@@ -1,6 +1,6 @@
 ---
 name: git-auto-commit
-description: Automated git commit workflow that stages all changes, generates intelligent commit messages, and pushes to remote repository. Use this skill when user requests automatic git operations such as "auto commit my code", "commit my changes", "save my work", or any request to automatically commit and push changes. Also suitable for quick iterative development workflows where rapid commits are needed, or when the user wants to skip manual git operations and have Claude handle the full commit cycle.
+description: Automated git commit workflow that stages all changes, generates intelligent commit messages, and pushes to remote repository. Trigger this skill when user asks to commit code with phrases like "提交代码", "commit my code", "提交", "commit", "帮我提交", "自动提交", "auto commit", "保存代码", "save my work", "push代码", or any request to commit, save, or push changes. Use for quick iterative development workflows or when user wants to skip manual git operations and have Claude handle the full commit cycle automatically.
 ---
 
 # Git Auto-Commit
