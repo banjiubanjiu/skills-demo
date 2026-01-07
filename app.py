@@ -24,13 +24,18 @@ _strip_unsupported_proxy_env()
 
 import gradio as gr
 from anthropic import AsyncAnthropic
+import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SKILLS_DIR = PROJECT_ROOT / ".claude" / "skills"
-BASE_URL = os.getenv("BIGMODEL_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
-MODEL_NAME = os.getenv("BIGMODEL_MODEL", "glm-4.7")
-MAX_TOKENS = int(os.getenv("BIGMODEL_MAX_TOKENS", "1200"))
-MAX_IMAGE_BYTES = int(os.getenv("BIGMODEL_MAX_IMAGE_BYTES", "8000000"))
+CONFIG_PATH = Path(os.getenv("RECOVERY_CONFIG_PATH", PROJECT_ROOT / "config.local.yaml"))
+DEFAULT_CONFIG = {
+    "api_key": "",
+    "base_url": "https://open.bigmodel.cn/api/anthropic",
+    "model": "glm-4.7",
+    "max_tokens": 1200,
+    "max_image_bytes": 8000000,
+}
 SKILL_NAMES = [
     "athlete-rehab-plan",
     "athlete-risk-flags",
@@ -53,6 +58,7 @@ Safety:
 - If red flags exist, lead with urgent guidance to seek in-person care.
 
 Use the skill references appended below when relevant. Only surface bigmodel-claude-compat when the user asks about API or SDK compatibility.
+If the user request is to conduct an interview or ask follow-up questions, output questions only and do not provide a plan yet.
 Use Markdown with clear headings and concise bullets.
 """
 
@@ -310,6 +316,96 @@ def _load_skill_text(skill_name: str, include_references: bool) -> str:
     return "\n\n".join(parts).strip()
 
 
+def _load_config_file() -> tuple[dict, str | None]:
+    if not CONFIG_PATH.exists():
+        return {}, None
+    try:
+        raw = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        return {}, f"Config read failed: {exc}"
+    if not isinstance(raw, dict):
+        return {}, "Config must be a YAML mapping."
+    return raw, None
+
+
+def _parse_int(value: object, fallback: int) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _runtime_config() -> dict:
+    config, _ = _load_config_file()
+    merged = DEFAULT_CONFIG.copy()
+    merged.update(config)
+    env_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("ZHIPUAI_API_KEY")
+    if env_key:
+        merged["api_key"] = env_key
+    if os.getenv("BIGMODEL_BASE_URL"):
+        merged["base_url"] = os.getenv("BIGMODEL_BASE_URL")
+    if os.getenv("BIGMODEL_MODEL"):
+        merged["model"] = os.getenv("BIGMODEL_MODEL")
+    if os.getenv("BIGMODEL_MAX_TOKENS"):
+        merged["max_tokens"] = _parse_int(os.getenv("BIGMODEL_MAX_TOKENS"), merged["max_tokens"])
+    if os.getenv("BIGMODEL_MAX_IMAGE_BYTES"):
+        merged["max_image_bytes"] = _parse_int(
+            os.getenv("BIGMODEL_MAX_IMAGE_BYTES"),
+            merged["max_image_bytes"],
+        )
+    merged["max_tokens"] = _parse_int(merged.get("max_tokens"), DEFAULT_CONFIG["max_tokens"])
+    merged["max_image_bytes"] = _parse_int(
+        merged.get("max_image_bytes"),
+        DEFAULT_CONFIG["max_image_bytes"],
+    )
+    return merged
+
+
+def _settings_for_ui() -> tuple[str, str, str, int, int, str]:
+    config, error = _load_config_file()
+    merged = DEFAULT_CONFIG.copy()
+    merged.update(config)
+    status = "Settings loaded from config.local.yaml."
+    if error:
+        status = error
+    if not CONFIG_PATH.exists():
+        status = "No config.local.yaml found. Using defaults until saved."
+    return (
+        str(merged.get("api_key", "")),
+        str(merged.get("base_url", DEFAULT_CONFIG["base_url"])),
+        str(merged.get("model", DEFAULT_CONFIG["model"])),
+        _parse_int(merged.get("max_tokens"), DEFAULT_CONFIG["max_tokens"]),
+        _parse_int(merged.get("max_image_bytes"), DEFAULT_CONFIG["max_image_bytes"]),
+        status,
+    )
+
+
+def _save_settings(
+    api_key: str,
+    base_url: str,
+    model: str,
+    max_tokens: int,
+    max_image_bytes: int,
+) -> str:
+    config, error = _load_config_file()
+    if error:
+        config = {}
+    if api_key and api_key.strip():
+        config["api_key"] = api_key.strip()
+    config["base_url"] = (base_url or "").strip() or DEFAULT_CONFIG["base_url"]
+    config["model"] = (model or "").strip() or DEFAULT_CONFIG["model"]
+    config["max_tokens"] = _parse_int(max_tokens, DEFAULT_CONFIG["max_tokens"])
+    config["max_image_bytes"] = _parse_int(
+        max_image_bytes,
+        DEFAULT_CONFIG["max_image_bytes"],
+    )
+    CONFIG_PATH.write_text(
+        yaml.safe_dump(config, sort_keys=False),
+        encoding="utf-8",
+    )
+    return f"Saved settings to {CONFIG_PATH.name}."
+
+
 @lru_cache(maxsize=1)
 def _load_skill_context() -> str:
     parts = []
@@ -395,17 +491,20 @@ def _build_intake(
 
 
 def _get_api_key() -> str:
-    return os.getenv("ANTHROPIC_API_KEY") or os.getenv("ZHIPUAI_API_KEY") or ""
+    return str(_runtime_config().get("api_key", "")).strip()
 
 
-def _build_image_payload(image_path: str | None) -> tuple[dict | None, str | None]:
+def _build_image_payload(
+    image_path: str | None,
+    max_bytes: int,
+) -> tuple[dict | None, str | None]:
     if not image_path:
         return None, None
     try:
         if not os.path.exists(image_path):
             return None, "Image path not found; proceeding without image."
         size = os.path.getsize(image_path)
-        if size > MAX_IMAGE_BYTES:
+        if size > max_bytes:
             return None, "Image too large; proceeding without image."
         media_type = mimetypes.guess_type(image_path)[0]
         if not media_type or not media_type.startswith("image/"):
@@ -441,6 +540,8 @@ def _build_messages(
         messages.append({"role": "user", "content": content})
     else:
         messages.append({"role": "user", "content": user_message})
+    if messages and messages[0]["role"] == "assistant":
+        messages.insert(0, {"role": "user", "content": "已提供基础信息，请开始问诊。"})
     return messages
 
 
@@ -487,12 +588,13 @@ async def _run_agent(
     messages: List[dict],
     had_image: bool,
 ) -> str:
-    api_key = _get_api_key()
-    client = AsyncAnthropic(api_key=api_key, base_url=BASE_URL)
+    config = _runtime_config()
+    api_key = str(config.get("api_key", "")).strip()
+    client = AsyncAnthropic(api_key=api_key, base_url=str(config.get("base_url")))
     try:
         response = await client.messages.create(
-            model=MODEL_NAME,
-            max_tokens=MAX_TOKENS,
+            model=str(config.get("model")),
+            max_tokens=_parse_int(config.get("max_tokens"), DEFAULT_CONFIG["max_tokens"]),
             system=system_prompt,
             messages=messages,
         )
@@ -507,8 +609,8 @@ async def _run_agent(
             if last.get("role") == "user":
                 last["content"] = _append_image_failure_note(str(last.get("content", "")))
         response = await client.messages.create(
-            model=MODEL_NAME,
-            max_tokens=MAX_TOKENS,
+            model=str(config.get("model")),
+            max_tokens=_parse_int(config.get("max_tokens"), DEFAULT_CONFIG["max_tokens"]),
             system=system_prompt,
             messages=fallback_messages,
         )
@@ -534,7 +636,7 @@ async def respond(
     notes: str,
 ) -> str:
     if not _get_api_key():
-        return "Missing ANTHROPIC_API_KEY (or ZHIPUAI_API_KEY). Set it before running."
+        return "Missing API key. Set ANTHROPIC_API_KEY or add api_key in config.local.yaml."
 
     normalized_history = _normalize_history(history or [])
     intake = _build_intake(
@@ -552,7 +654,11 @@ async def respond(
         treatment_done,
         notes,
     )
-    image_payload, image_note = _build_image_payload(injury_image)
+    config = _runtime_config()
+    image_payload, image_note = _build_image_payload(
+        injury_image,
+        _parse_int(config.get("max_image_bytes"), DEFAULT_CONFIG["max_image_bytes"]),
+    )
     user_message = f"""Athlete intake:
 {intake}
 
@@ -593,6 +699,32 @@ def build_app() -> gr.Blocks:
             "This tool is for education only and not a substitute for medical care.",
             elem_classes=["disclaimer"],
         )
+
+        with gr.Accordion("Settings", open=False):
+            api_key_input = gr.Textbox(
+                label="API key",
+                type="password",
+                placeholder="Paste your ZhipuAI API key",
+            )
+            base_url_input = gr.Textbox(
+                label="Base URL",
+                value=DEFAULT_CONFIG["base_url"],
+            )
+            model_input = gr.Textbox(label="Model", value=DEFAULT_CONFIG["model"])
+            max_tokens_input = gr.Number(
+                label="Max tokens",
+                value=DEFAULT_CONFIG["max_tokens"],
+                precision=0,
+            )
+            max_image_bytes_input = gr.Number(
+                label="Max image bytes",
+                value=DEFAULT_CONFIG["max_image_bytes"],
+                precision=0,
+            )
+            with gr.Row():
+                save_settings = gr.Button("Save settings")
+                reload_settings = gr.Button("Reload settings")
+            settings_status = gr.Markdown()
 
         def _toggle_steps(step: int):
             return (
@@ -645,13 +777,66 @@ def build_app() -> gr.Blocks:
                 return gr.update(interactive=False), gr.update(value=note, visible=True)
             return gr.update(interactive=True), gr.update(value="", visible=False)
 
-        def _go_step2_if_valid(
+        async def _send_message(
+            message: str,
+            history: List[dict],
             sport: str,
             injury_region: str,
             injury_type: str,
             onset_type: str,
             time_since: str,
+            pain_score: int,
+            symptoms: List[str],
+            injury_image: str,
             training_goal: str,
+            training_phase: str,
+            prior_injury: str,
+            treatment_done: str,
+            notes: str,
+        ):
+            if not message.strip():
+                return history, history, ""
+            interview_note = (
+                "Continue the interview. Ask 1-3 follow-up questions only, "
+                "do not provide a plan yet."
+            )
+            response = await respond(
+                f"{interview_note}\n\nUser answer: {message}",
+                history,
+                sport,
+                injury_region,
+                injury_type,
+                onset_type,
+                time_since,
+                pain_score,
+                symptoms,
+                injury_image,
+                training_goal,
+                training_phase,
+                prior_injury,
+                treatment_done,
+                notes,
+            )
+            updated = (history or []) + [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": response},
+            ]
+            return updated, updated, ""
+
+        async def _enter_step2(
+            sport: str,
+            injury_region: str,
+            injury_type: str,
+            onset_type: str,
+            time_since: str,
+            pain_score: int,
+            symptoms: List[str],
+            injury_image: str,
+            training_goal: str,
+            training_phase: str,
+            prior_injury: str,
+            treatment_done: str,
+            notes: str,
         ):
             missing = _missing_required_fields(
                 sport,
@@ -669,37 +854,17 @@ def build_app() -> gr.Blocks:
                     gr.update(visible=False),
                     gr.update(interactive=False),
                     gr.update(value=note, visible=True),
+                    [],
+                    [],
+                    "",
                 )
-            return (
-                gr.update(visible=False),
-                gr.update(visible=True),
-                gr.update(visible=False),
-                gr.update(interactive=True),
-                gr.update(value="", visible=False),
+            interview_prompt = (
+                "你将开始问诊。基于已提供的信息，提出5-7个高价值追问问题，"
+                "只输出问题（编号列表），不要给出诊疗方案。"
             )
-
-        async def _send_message(
-            message: str,
-            history: List[List[str]],
-            sport: str,
-            injury_region: str,
-            injury_type: str,
-            onset_type: str,
-            time_since: str,
-            pain_score: int,
-            symptoms: List[str],
-            injury_image: str,
-            training_goal: str,
-            training_phase: str,
-            prior_injury: str,
-            treatment_done: str,
-            notes: str,
-        ):
-            if not message.strip():
-                return history, history, ""
             response = await respond(
-                message,
-                history,
+                interview_prompt,
+                [],
                 sport,
                 injury_region,
                 injury_type,
@@ -714,11 +879,20 @@ def build_app() -> gr.Blocks:
                 treatment_done,
                 notes,
             )
-            updated = (history or []) + [[message, response]]
-            return updated, updated, ""
+            initial_history = [{"role": "assistant", "content": response}]
+            return (
+                gr.update(visible=False),
+                gr.update(visible=True),
+                gr.update(visible=False),
+                gr.update(interactive=True),
+                gr.update(value="", visible=False),
+                initial_history,
+                initial_history,
+                "",
+            )
 
         async def _generate_plan(
-            history: List[List[str]],
+            history: List[dict],
             sport: str,
             injury_region: str,
             injury_type: str,
@@ -735,6 +909,12 @@ def build_app() -> gr.Blocks:
         ):
             if not history:
                 return "No interview history yet. Go back to Step 2 and answer a few questions first."
+            has_user_reply = any(
+                item.get("role") == "user" and str(item.get("content", "")).strip()
+                for item in history
+            )
+            if not has_user_reply:
+                return "No interview answers yet. Go back to Step 2 and answer the follow-up questions first."
             plan_request = (
                 "Generate a final phased rehab plan and clinical advice based on the intake "
                 "and interview. Include progression criteria, return-to-sport checklist, and "
@@ -894,10 +1074,53 @@ def build_app() -> gr.Blocks:
                 outputs=[to_step2, validation_note],
             )
 
+        save_settings.click(
+            _save_settings,
+            inputs=[
+                api_key_input,
+                base_url_input,
+                model_input,
+                max_tokens_input,
+                max_image_bytes_input,
+            ],
+            outputs=[settings_status],
+        )
+        reload_settings.click(
+            _settings_for_ui,
+            outputs=[
+                api_key_input,
+                base_url_input,
+                model_input,
+                max_tokens_input,
+                max_image_bytes_input,
+                settings_status,
+            ],
+        )
+        demo.load(
+            _settings_for_ui,
+            outputs=[
+                api_key_input,
+                base_url_input,
+                model_input,
+                max_tokens_input,
+                max_image_bytes_input,
+                settings_status,
+            ],
+        )
+
         to_step2.click(
-            _go_step2_if_valid,
-            inputs=required_inputs,
-            outputs=[step1_group, step2_group, step3_group, to_step2, validation_note],
+            _enter_step2,
+            inputs=intake_inputs,
+            outputs=[
+                step1_group,
+                step2_group,
+                step3_group,
+                to_step2,
+                validation_note,
+                chat,
+                chat_history,
+                chat_input,
+            ],
         )
         back_to_step1.click(
             lambda: _toggle_steps(1),
