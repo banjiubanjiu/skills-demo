@@ -1,0 +1,18 @@
+# Local automation artifacts
+.dev-browser*.log
+.skillsmp*.json
+.skillsmp*.txt
+.anthropic-skills*.json
+.anthropic-skills*.txt
+.claude-scientific-skills-*.json
+.claude-scientific-skills-*.txt
+
+# Local scratch
+tmp/
+dist/
+
+# Editor/runtime config
+.claude/
+
+# Secrets
+.env

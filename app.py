@@ -1,0 +1,492 @@
+import os
+from functools import lru_cache
+from pathlib import Path
+from typing import Iterable, List
+
+
+def _strip_unsupported_proxy_env() -> None:
+    for key in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        value = os.getenv(key, "")
+        if value.startswith(("socks://", "socks5://", "socks5h://")):
+            os.environ.pop(key, None)
+
+
+_strip_unsupported_proxy_env()
+
+import gradio as gr
+from anthropic import AsyncAnthropic
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+SKILLS_DIR = PROJECT_ROOT / ".claude" / "skills"
+BASE_URL = os.getenv("BIGMODEL_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
+MODEL_NAME = os.getenv("BIGMODEL_MODEL", "glm-4.7")
+MAX_TOKENS = int(os.getenv("BIGMODEL_MAX_TOKENS", "1200"))
+SKILL_NAMES = [
+    "athlete-rehab-plan",
+    "athlete-risk-flags",
+    "athlete-clinical-advice",
+    "bigmodel-claude-compat",
+]
+
+SYSTEM_PROMPT = """You are a sports injury rehab assistant for athletes.
+You provide educational guidance only and are not a medical professional.
+Respond in Simplified Chinese.
+
+Priorities:
+- Phased rehab plan with progression criteria.
+- Risk warnings and red flags.
+- Educational clinical advice (possible causes, imaging considerations).
+- Return-to-sport checkpoints.
+
+Safety:
+- Do not provide definitive diagnosis or medication dosing.
+- If red flags exist, lead with urgent guidance to seek in-person care.
+
+Use the skill references appended below when relevant. Only surface bigmodel-claude-compat when the user asks about API or SDK compatibility.
+Use Markdown with clear headings and concise bullets.
+"""
+
+CSS = """
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Rubik+Mono+One&display=swap');
+
+:root {
+  --bg: #0b0f14;
+  --panel: #121a25;
+  --ink: #f7f7f2;
+  --muted: #9fb0c5;
+  --accent: #1ef7a3;
+  --accent-2: #f5c542;
+  --danger: #ff3e5b;
+  --grid: rgba(247, 247, 242, 0.06);
+  --body-text-color: var(--ink);
+  --body-text-color-subdued: var(--muted);
+  --background-fill-primary: #0f1621;
+  --background-fill-secondary: #0b0f14;
+  --border-color-primary: #2b3a4f;
+  --block-label-text-color: var(--ink);
+  --block-title-text-color: var(--ink);
+  --block-info-text-color: var(--muted);
+  --input-background-fill: #0f1621;
+  --color-accent: var(--accent);
+  --color-accent-soft: rgba(30, 247, 163, 0.2);
+}
+
+body, .gradio-container {
+  background: radial-gradient(circle at 10% 10%, #1b2533 0%, #0b0f14 40%) !important;
+  color: var(--ink) !important;
+  font-family: "JetBrains Mono", monospace !important;
+}
+
+.gradio-container,
+.gradio-container * {
+  color: var(--ink);
+}
+
+.gradio-container {
+  border: 3px solid var(--accent);
+  box-shadow: 12px 12px 0 #0a1019, 24px 24px 0 rgba(30, 247, 163, 0.2);
+  position: relative;
+  padding: 20px;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.gradio-container:before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 24px 24px;
+  pointer-events: none;
+  opacity: 0.5;
+  z-index: 0;
+}
+
+.gradio-container > * {
+  position: relative;
+  z-index: 1;
+}
+
+.hero {
+  position: relative;
+  z-index: 1;
+  border: 2px solid var(--accent);
+  padding: 18px 20px;
+  margin-bottom: 16px;
+  background: linear-gradient(135deg, rgba(30, 247, 163, 0.16), rgba(18, 26, 37, 0.9));
+}
+
+.hero-title {
+  font-family: "Rubik Mono One", sans-serif;
+  font-size: clamp(22px, 3.2vw, 42px);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.hero-sub {
+  color: var(--muted);
+  margin-top: 8px;
+  max-width: 720px;
+}
+
+.hero-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.hero-tag {
+  border: 2px solid var(--accent-2);
+  padding: 4px 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+button, .gr-button {
+  border: 2px solid var(--accent) !important;
+  background: #0b111a !important;
+  color: var(--ink) !important;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+input, textarea, select, .gr-input, .gr-text-input, .gr-text-area, .gr-dropdown {
+  border: 2px solid #2b3a4f !important;
+  background: #0f1621 !important;
+  color: var(--ink) !important;
+}
+
+input[type="radio"],
+input[type="checkbox"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+label {
+  cursor: pointer;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted) !important;
+  opacity: 0.75;
+}
+
+select option {
+  background: #0f1621;
+  color: var(--ink);
+}
+
+.gr-chatbot .message {
+  border: 2px solid var(--accent);
+  background: rgba(18, 26, 37, 0.85);
+  box-shadow: 6px 6px 0 rgba(30, 247, 163, 0.2);
+}
+
+.gr-chatbot .message.user {
+  border-color: var(--accent-2);
+}
+
+.disclaimer {
+  border: 2px dashed var(--danger);
+  padding: 10px 12px;
+  color: var(--muted);
+  margin-bottom: 12px;
+  position: relative;
+  z-index: 1;
+}
+"""
+
+SYMPTOM_OPTIONS = [
+    "swelling",
+    "instability",
+    "locking or catching",
+    "numbness or tingling",
+    "visible deformity",
+    "open wound or bleeding",
+    "fever or chills",
+    "head injury symptoms",
+    "unable to bear weight",
+]
+
+RED_FLAG_SYMPTOMS = {
+    "visible deformity",
+    "open wound or bleeding",
+    "fever or chills",
+    "head injury symptoms",
+    "unable to bear weight",
+    "numbness or tingling",
+}
+
+
+def _strip_frontmatter(text: str) -> str:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return text.strip()
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            return "\n".join(lines[idx + 1 :]).strip()
+    return text.strip()
+
+
+def _load_skill_text(skill_name: str, include_references: bool) -> str:
+    skill_path = SKILLS_DIR / skill_name / "SKILL.md"
+    if not skill_path.exists():
+        return ""
+    body = _strip_frontmatter(skill_path.read_text(encoding="utf-8"))
+    parts = [f"[Skill: {skill_name}]\n{body}"] if body else []
+    if include_references:
+        ref_dir = SKILLS_DIR / skill_name / "references"
+        if ref_dir.exists():
+            for ref_file in sorted(ref_dir.glob("*.md")):
+                content = ref_file.read_text(encoding="utf-8").strip()
+                if content:
+                    parts.append(f"[Reference: {ref_file.name}]\n{content}")
+    return "\n\n".join(parts).strip()
+
+
+@lru_cache(maxsize=1)
+def _load_skill_context() -> str:
+    parts = []
+    for skill_name in SKILL_NAMES:
+        include_refs = skill_name == "bigmodel-claude-compat"
+        skill_text = _load_skill_text(skill_name, include_refs)
+        if skill_text:
+            parts.append(skill_text)
+    return "\n\n".join(parts)
+
+
+def _format_list(values: Iterable[str]) -> str:
+    cleaned = [value for value in values if value]
+    return ", ".join(cleaned) if cleaned else "none reported"
+
+
+def _build_intake(
+    sport: str,
+    injury_region: str,
+    injury_type: str,
+    onset_type: str,
+    time_since: str,
+    pain_score: int,
+    symptoms: List[str],
+    training_goal: str,
+    training_phase: str,
+    prior_injury: str,
+    treatment_done: str,
+    notes: str,
+) -> str:
+    symptom_text = _format_list(symptoms)
+    red_flags = sorted(RED_FLAG_SYMPTOMS.intersection(symptoms or []))
+    red_flags_text = _format_list(red_flags)
+    lines = [
+        f"Sport: {sport or 'unspecified'}",
+        f"Injury region: {injury_region or 'unspecified'}",
+        f"Injury type: {injury_type or 'unspecified'}",
+        f"Onset: {onset_type or 'unspecified'}",
+        f"Time since injury: {time_since or 'unspecified'}",
+        f"Pain score (0-10): {pain_score}",
+        f"Symptoms: {symptom_text}",
+        f"Red flags from intake: {red_flags_text}",
+        f"Training phase: {training_phase or 'unspecified'}",
+        f"Training goal: {training_goal or 'unspecified'}",
+        f"Prior injury: {prior_injury or 'none'}",
+        f"Treatments tried: {treatment_done or 'none'}",
+        f"Notes: {notes or 'none'}",
+    ]
+    return "\n".join(lines)
+
+
+def _get_api_key() -> str:
+    return os.getenv("ANTHROPIC_API_KEY") or os.getenv("ZHIPUAI_API_KEY") or ""
+
+
+def _build_messages(history: List[List[str]], user_message: str) -> List[dict]:
+    messages: List[dict] = []
+    for user_text, assistant_text in (history or [])[-6:]:
+        if user_text:
+            messages.append({"role": "user", "content": user_text})
+        if assistant_text:
+            messages.append({"role": "assistant", "content": assistant_text})
+    messages.append({"role": "user", "content": user_message})
+    return messages
+
+
+def _extract_response_text(response: object) -> str:
+    content = getattr(response, "content", None)
+    if not content:
+        return ""
+    parts = []
+    for block in content:
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            parts.append(text)
+        elif isinstance(block, dict) and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    return "".join(parts).strip()
+
+
+async def _run_agent(system_prompt: str, messages: List[dict]) -> str:
+    api_key = _get_api_key()
+    client = AsyncAnthropic(api_key=api_key, base_url=BASE_URL)
+    response = await client.messages.create(
+        model=MODEL_NAME,
+        max_tokens=MAX_TOKENS,
+        system=system_prompt,
+        messages=messages,
+    )
+    text = _extract_response_text(response)
+    return text or "No response received from the model."
+
+
+async def respond(
+    message: str,
+    history: List[List[str]],
+    sport: str,
+    injury_region: str,
+    injury_type: str,
+    onset_type: str,
+    time_since: str,
+    pain_score: int,
+    symptoms: List[str],
+    training_goal: str,
+    training_phase: str,
+    prior_injury: str,
+    treatment_done: str,
+    notes: str,
+) -> str:
+    if not _get_api_key():
+        return "Missing ANTHROPIC_API_KEY (or ZHIPUAI_API_KEY). Set it before running."
+
+    intake = _build_intake(
+        sport,
+        injury_region,
+        injury_type,
+        onset_type,
+        time_since,
+        pain_score,
+        symptoms or [],
+        training_goal,
+        training_phase,
+        prior_injury,
+        treatment_done,
+        notes,
+    )
+    user_message = f"""Athlete intake:
+{intake}
+
+User request:
+{message}
+"""
+    system_prompt = f"""{SYSTEM_PROMPT}
+
+Skill references:
+{_load_skill_context()}
+"""
+    messages = _build_messages(history or [], user_message)
+    return await _run_agent(system_prompt, messages)
+
+
+def build_app() -> gr.Blocks:
+    with gr.Blocks(css=CSS) as demo:
+        gr.HTML(
+            """
+            <div class="hero">
+              <div class="hero-title">Recovery Ops</div>
+              <div class="hero-sub">
+                Athlete-focused sports injury rehab assistant. Phased plans, red flags,
+                and clinical guidance for safer return-to-sport decisions.
+              </div>
+              <div class="hero-tags">
+                <span class="hero-tag">Phase Plan</span>
+                <span class="hero-tag">Risk Flags</span>
+                <span class="hero-tag">Clinical Notes</span>
+                <span class="hero-tag">Return Criteria</span>
+              </div>
+            </div>
+            """
+        )
+        gr.Markdown(
+            "This tool is for education only and not a substitute for medical care.",
+            elem_classes=["disclaimer"],
+        )
+
+        sport = gr.Textbox(label="Sport", placeholder="e.g., soccer, basketball")
+        injury_region = gr.Dropdown(
+            label="Injury region",
+            choices=[
+                "ankle",
+                "knee",
+                "hip",
+                "lower back",
+                "shoulder",
+                "elbow",
+                "wrist or hand",
+                "foot",
+                "hamstring",
+                "quad",
+                "calf",
+                "neck",
+                "other",
+            ],
+            value="knee",
+        )
+        injury_type = gr.Textbox(label="Injury type", placeholder="e.g., sprain, strain")
+        onset_type = gr.Radio(
+            label="Onset type",
+            choices=["acute trauma", "overuse", "unknown"],
+            value="acute trauma",
+        )
+        time_since = gr.Textbox(label="Time since injury", placeholder="e.g., 2 days, 3 weeks")
+        pain_score = gr.Slider(label="Pain score", minimum=0, maximum=10, value=4, step=1)
+        symptoms = gr.CheckboxGroup(label="Symptoms", choices=SYMPTOM_OPTIONS)
+        training_goal = gr.Textbox(
+            label="Training goal",
+            placeholder="e.g., return to competition in 6 weeks",
+        )
+        training_phase = gr.Dropdown(
+            label="Training phase",
+            choices=["in-season", "off-season", "pre-season", "returning"],
+            value="in-season",
+        )
+        prior_injury = gr.Textbox(label="Prior injury history", placeholder="optional")
+        treatment_done = gr.Textbox(label="Treatments tried", placeholder="e.g., rest, ice")
+        notes = gr.Textbox(label="Extra notes", lines=3, placeholder="optional")
+
+        gr.ChatInterface(
+            fn=respond,
+            additional_inputs=[
+                sport,
+                injury_region,
+                injury_type,
+                onset_type,
+                time_since,
+                pain_score,
+                symptoms,
+                training_goal,
+                training_phase,
+                prior_injury,
+                treatment_done,
+                notes,
+            ],
+            additional_inputs_accordion="Athlete Intake",
+            textbox=gr.Textbox(
+                placeholder="Describe the injury context or ask a rehab question...",
+                lines=3,
+            ),
+        )
+    return demo
+
+
+if __name__ == "__main__":
+    build_app().launch()
