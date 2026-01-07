@@ -203,6 +203,15 @@ label {
   cursor: pointer;
 }
 
+.required label::after,
+.required .block-label::after,
+.required .label::after,
+.required .field-label::after {
+  content: " *";
+  color: var(--danger);
+  margin-left: 4px;
+}
+
 label[data-testid$="-radio-label"],
 label[data-testid$="-checkbox-label"] {
   display: inline-flex;
@@ -585,56 +594,112 @@ def build_app() -> gr.Blocks:
             elem_classes=["disclaimer"],
         )
 
-        sport = gr.Textbox(label="Sport", placeholder="e.g., soccer, basketball")
-        injury_region = gr.Dropdown(
-            label="Injury region",
-            choices=[
-                "ankle",
-                "knee",
-                "hip",
-                "lower back",
-                "shoulder",
-                "elbow",
-                "wrist or hand",
-                "foot",
-                "hamstring",
-                "quad",
-                "calf",
-                "neck",
-                "other",
-            ],
-            value="knee",
-        )
-        injury_type = gr.Textbox(label="Injury type", placeholder="e.g., sprain, strain")
-        onset_type = gr.Radio(
-            label="Onset type",
-            choices=["acute trauma", "overuse", "unknown"],
-            value="acute trauma",
-        )
-        time_since = gr.Textbox(label="Time since injury", placeholder="e.g., 2 days, 3 weeks")
-        pain_score = gr.Slider(label="Pain score", minimum=0, maximum=10, value=4, step=1)
-        symptoms = gr.CheckboxGroup(label="Symptoms", choices=SYMPTOM_OPTIONS)
-        injury_image = gr.Image(
-            label="Optional image (PNG/JPG)",
-            type="filepath",
-            height=160,
-        )
-        training_goal = gr.Textbox(
-            label="Training goal",
-            placeholder="e.g., return to competition in 6 weeks",
-        )
-        training_phase = gr.Dropdown(
-            label="Training phase",
-            choices=["in-season", "off-season", "pre-season", "returning"],
-            value="in-season",
-        )
-        prior_injury = gr.Textbox(label="Prior injury history", placeholder="optional")
-        treatment_done = gr.Textbox(label="Treatments tried", placeholder="e.g., rest, ice")
-        notes = gr.Textbox(label="Extra notes", lines=3, placeholder="optional")
+        def _toggle_steps(step: int):
+            return (
+                gr.update(visible=step == 1),
+                gr.update(visible=step == 2),
+                gr.update(visible=step == 3),
+            )
 
-        gr.ChatInterface(
-            fn=respond,
-            additional_inputs=[
+        def _missing_required_fields(
+            sport: str,
+            injury_region: str,
+            injury_type: str,
+            onset_type: str,
+            time_since: str,
+            training_goal: str,
+        ) -> List[str]:
+            missing = []
+            if not sport or not sport.strip():
+                missing.append("Sport")
+            if not injury_region:
+                missing.append("Injury region")
+            if not injury_type or not injury_type.strip():
+                missing.append("Injury type")
+            if not onset_type:
+                missing.append("Onset type")
+            if not time_since or not time_since.strip():
+                missing.append("Time since injury")
+            if not training_goal or not training_goal.strip():
+                missing.append("Training goal")
+            return missing
+
+        def _validate_step1(
+            sport: str,
+            injury_region: str,
+            injury_type: str,
+            onset_type: str,
+            time_since: str,
+            training_goal: str,
+        ):
+            missing = _missing_required_fields(
+                sport,
+                injury_region,
+                injury_type,
+                onset_type,
+                time_since,
+                training_goal,
+            )
+            if missing:
+                note = "Complete required fields: " + ", ".join(missing)
+                return gr.update(interactive=False), gr.update(value=note, visible=True)
+            return gr.update(interactive=True), gr.update(value="", visible=False)
+
+        def _go_step2_if_valid(
+            sport: str,
+            injury_region: str,
+            injury_type: str,
+            onset_type: str,
+            time_since: str,
+            training_goal: str,
+        ):
+            missing = _missing_required_fields(
+                sport,
+                injury_region,
+                injury_type,
+                onset_type,
+                time_since,
+                training_goal,
+            )
+            if missing:
+                note = "Complete required fields: " + ", ".join(missing)
+                return (
+                    gr.update(visible=True),
+                    gr.update(visible=False),
+                    gr.update(visible=False),
+                    gr.update(interactive=False),
+                    gr.update(value=note, visible=True),
+                )
+            return (
+                gr.update(visible=False),
+                gr.update(visible=True),
+                gr.update(visible=False),
+                gr.update(interactive=True),
+                gr.update(value="", visible=False),
+            )
+
+        async def _send_message(
+            message: str,
+            history: List[List[str]],
+            sport: str,
+            injury_region: str,
+            injury_type: str,
+            onset_type: str,
+            time_since: str,
+            pain_score: int,
+            symptoms: List[str],
+            injury_image: str,
+            training_goal: str,
+            training_phase: str,
+            prior_injury: str,
+            treatment_done: str,
+            notes: str,
+        ):
+            if not message.strip():
+                return history, history, ""
+            response = await respond(
+                message,
+                history,
                 sport,
                 injury_region,
                 injury_type,
@@ -648,12 +713,213 @@ def build_app() -> gr.Blocks:
                 prior_injury,
                 treatment_done,
                 notes,
-            ],
-            additional_inputs_accordion="Athlete Intake",
-            textbox=gr.Textbox(
-                placeholder="Describe the injury context or ask a rehab question...",
+            )
+            updated = (history or []) + [[message, response]]
+            return updated, updated, ""
+
+        async def _generate_plan(
+            history: List[List[str]],
+            sport: str,
+            injury_region: str,
+            injury_type: str,
+            onset_type: str,
+            time_since: str,
+            pain_score: int,
+            symptoms: List[str],
+            injury_image: str,
+            training_goal: str,
+            training_phase: str,
+            prior_injury: str,
+            treatment_done: str,
+            notes: str,
+        ):
+            if not history:
+                return "No interview history yet. Go back to Step 2 and answer a few questions first."
+            plan_request = (
+                "Generate a final phased rehab plan and clinical advice based on the intake "
+                "and interview. Include progression criteria, return-to-sport checklist, and "
+                "clear risk flags. If any red flags exist, lead with urgent guidance."
+            )
+            return await respond(
+                plan_request,
+                history,
+                sport,
+                injury_region,
+                injury_type,
+                onset_type,
+                time_since,
+                pain_score,
+                symptoms,
+                injury_image,
+                training_goal,
+                training_phase,
+                prior_injury,
+                treatment_done,
+                notes,
+            )
+
+        step1_group = gr.Group(visible=True)
+        step2_group = gr.Group(visible=False)
+        step3_group = gr.Group(visible=False)
+
+        with step1_group:
+            gr.Markdown("Step 1: Intake & uploads")
+            validation_note = gr.Markdown(visible=False)
+            sport = gr.Textbox(
+                label="Sport",
+                placeholder="e.g., soccer, basketball",
+                elem_classes=["required"],
+            )
+            injury_region = gr.Dropdown(
+                label="Injury region",
+                choices=[
+                    "ankle",
+                    "knee",
+                    "hip",
+                    "lower back",
+                    "shoulder",
+                    "elbow",
+                    "wrist or hand",
+                    "foot",
+                    "hamstring",
+                    "quad",
+                    "calf",
+                    "neck",
+                    "other",
+                ],
+                value="knee",
+                elem_classes=["required"],
+            )
+            injury_type = gr.Textbox(
+                label="Injury type",
+                placeholder="e.g., sprain, strain",
+                elem_classes=["required"],
+            )
+            onset_type = gr.Radio(
+                label="Onset type",
+                choices=["acute trauma", "overuse", "unknown"],
+                value="acute trauma",
+                elem_classes=["required"],
+            )
+            time_since = gr.Textbox(
+                label="Time since injury",
+                placeholder="e.g., 2 days, 3 weeks",
+                elem_classes=["required"],
+            )
+            pain_score = gr.Slider(label="Pain score", minimum=0, maximum=10, value=4, step=1)
+            symptoms = gr.CheckboxGroup(label="Symptoms", choices=SYMPTOM_OPTIONS)
+            injury_image = gr.Image(
+                label="Optional image (PNG/JPG)",
+                type="filepath",
+                height=160,
+            )
+            training_goal = gr.Textbox(
+                label="Training goal",
+                placeholder="e.g., return to competition in 6 weeks",
+                elem_classes=["required"],
+            )
+            training_phase = gr.Dropdown(
+                label="Training phase",
+                choices=["in-season", "off-season", "pre-season", "returning"],
+                value="in-season",
+            )
+            prior_injury = gr.Textbox(label="Prior injury history", placeholder="optional")
+            treatment_done = gr.Textbox(label="Treatments tried", placeholder="e.g., rest, ice")
+            notes = gr.Textbox(
+                label="Report summary / extra notes",
                 lines=3,
-            ),
+                placeholder="e.g., MRI impression or prior clinician notes",
+            )
+            to_step2 = gr.Button("Step 2: Start interview", interactive=False)
+
+        with step2_group:
+            gr.Markdown("Step 2: Interview")
+            chat_history = gr.State([])
+            chat = gr.Chatbot(height=360)
+            chat_input = gr.Textbox(
+                placeholder="Answer the intake questions or ask a specific concern...",
+                lines=3,
+            )
+            with gr.Row():
+                send_btn = gr.Button("Send")
+                back_to_step1 = gr.Button("Back to intake")
+                to_step3 = gr.Button("Step 3: Generate plan")
+
+        with step3_group:
+            gr.Markdown("Step 3: Plan & recommendations")
+            plan_output = gr.Markdown()
+            with gr.Row():
+                back_to_step2 = gr.Button("Back to interview")
+                regenerate_plan = gr.Button("Regenerate plan")
+
+        intake_inputs = [
+            sport,
+            injury_region,
+            injury_type,
+            onset_type,
+            time_since,
+            pain_score,
+            symptoms,
+            injury_image,
+            training_goal,
+            training_phase,
+            prior_injury,
+            treatment_done,
+            notes,
+        ]
+        required_inputs = [
+            sport,
+            injury_region,
+            injury_type,
+            onset_type,
+            time_since,
+            training_goal,
+        ]
+
+        send_btn.click(
+            _send_message,
+            inputs=[chat_input, chat_history] + intake_inputs,
+            outputs=[chat, chat_history, chat_input],
+        )
+        chat_input.submit(
+            _send_message,
+            inputs=[chat_input, chat_history] + intake_inputs,
+            outputs=[chat, chat_history, chat_input],
+        )
+
+        for comp in required_inputs:
+            comp.change(
+                _validate_step1,
+                inputs=required_inputs,
+                outputs=[to_step2, validation_note],
+            )
+
+        to_step2.click(
+            _go_step2_if_valid,
+            inputs=required_inputs,
+            outputs=[step1_group, step2_group, step3_group, to_step2, validation_note],
+        )
+        back_to_step1.click(
+            lambda: _toggle_steps(1),
+            outputs=[step1_group, step2_group, step3_group],
+        )
+        back_to_step2.click(
+            lambda: _toggle_steps(2),
+            outputs=[step1_group, step2_group, step3_group],
+        )
+        to_step3.click(
+            _generate_plan,
+            inputs=[chat_history] + intake_inputs,
+            outputs=[plan_output],
+        )
+        to_step3.click(
+            lambda: _toggle_steps(3),
+            outputs=[step1_group, step2_group, step3_group],
+        )
+        regenerate_plan.click(
+            _generate_plan,
+            inputs=[chat_history] + intake_inputs,
+            outputs=[plan_output],
         )
     return demo
 
