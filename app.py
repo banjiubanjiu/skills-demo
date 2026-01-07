@@ -1,3 +1,5 @@
+import base64
+import mimetypes
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -28,6 +30,7 @@ SKILLS_DIR = PROJECT_ROOT / ".claude" / "skills"
 BASE_URL = os.getenv("BIGMODEL_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
 MODEL_NAME = os.getenv("BIGMODEL_MODEL", "glm-4.7")
 MAX_TOKENS = int(os.getenv("BIGMODEL_MAX_TOKENS", "1200"))
+MAX_IMAGE_BYTES = int(os.getenv("BIGMODEL_MAX_IMAGE_BYTES", "8000000"))
 SKILL_NAMES = [
     "athlete-rehab-plan",
     "athlete-risk-flags",
@@ -76,6 +79,29 @@ CSS = """
   --input-background-fill: #0f1621;
   --color-accent: var(--accent);
   --color-accent-soft: rgba(30, 247, 163, 0.2);
+  --checkbox-border-width: 2px;
+  --checkbox-border-radius: 999px;
+  --checkbox-border-color: #2b3a4f;
+  --checkbox-border-color-hover: #3a4c63;
+  --checkbox-border-color-focus: var(--accent);
+  --checkbox-border-color-selected: var(--accent);
+  --checkbox-background-color: #0f1621;
+  --checkbox-background-color-hover: #172233;
+  --checkbox-background-color-focus: #172233;
+  --checkbox-background-color-selected: #0f1621;
+  --checkbox-shadow: none;
+  --radio-circle: radial-gradient(circle at 50% 50%, #1ef7a3 0 45%, transparent 50%);
+  --checkbox-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 10'%3E%3Cpath fill='%23ffffff' d='M4.2 7.3L1.4 4.5l-1 1L4.2 9.3 11.6 1.9l-1-1z'/%3E%3C/svg%3E");
+  --checkbox-label-text-color: var(--ink);
+  --checkbox-label-text-color-selected: var(--ink);
+  --checkbox-label-background-fill: rgba(15, 22, 33, 0.7);
+  --checkbox-label-background-fill-hover: rgba(23, 34, 51, 0.9);
+  --checkbox-label-background-fill-selected: rgba(30, 247, 163, 0.12);
+  --checkbox-label-border-color: #2b3a4f;
+  --checkbox-label-border-color-selected: var(--accent);
+  --checkbox-label-border-width: 2px;
+  --checkbox-label-padding: 6px 10px;
+  --checkbox-label-gap: 8px;
 }
 
 body, .gradio-container {
@@ -177,6 +203,25 @@ label {
   cursor: pointer;
 }
 
+label[data-testid$="-radio-label"],
+label[data-testid$="-checkbox-label"] {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--checkbox-label-gap);
+  padding: var(--checkbox-label-padding);
+  border-radius: 999px;
+  border: var(--checkbox-label-border-width) solid var(--checkbox-label-border-color);
+  background: var(--checkbox-label-background-fill);
+  color: var(--checkbox-label-text-color);
+}
+
+label[data-testid$="-radio-label"].selected,
+label[data-testid$="-checkbox-label"].selected {
+  border-color: var(--checkbox-label-border-color-selected);
+  background: var(--checkbox-label-background-fill-selected);
+  color: var(--checkbox-label-text-color-selected);
+}
+
 input::placeholder,
 textarea::placeholder {
   color: var(--muted) !important;
@@ -272,6 +317,36 @@ def _format_list(values: Iterable[str]) -> str:
     return ", ".join(cleaned) if cleaned else "none reported"
 
 
+def _normalize_history(history: List) -> List[List[str]]:
+    if not history:
+        return []
+    first = history[0]
+    if isinstance(first, dict):
+        normalized = []
+        pending_user = None
+        for item in history:
+            role = item.get("role")
+            content = item.get("content", "")
+            if role == "user":
+                if pending_user is not None:
+                    normalized.append([pending_user, ""])
+                pending_user = content
+            elif role == "assistant":
+                if pending_user is None:
+                    normalized.append(["", content])
+                else:
+                    normalized.append([pending_user, content])
+                    pending_user = None
+        if pending_user is not None:
+            normalized.append([pending_user, ""])
+        return normalized
+    normalized = []
+    for item in history:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            normalized.append([item[0], item[1]])
+    return normalized
+
+
 def _build_intake(
     sport: str,
     injury_region: str,
@@ -280,6 +355,7 @@ def _build_intake(
     time_since: str,
     pain_score: int,
     symptoms: List[str],
+    image_path: str,
     training_goal: str,
     training_phase: str,
     prior_injury: str,
@@ -289,6 +365,7 @@ def _build_intake(
     symptom_text = _format_list(symptoms)
     red_flags = sorted(RED_FLAG_SYMPTOMS.intersection(symptoms or []))
     red_flags_text = _format_list(red_flags)
+    image_status = "yes" if image_path else "no"
     lines = [
         f"Sport: {sport or 'unspecified'}",
         f"Injury region: {injury_region or 'unspecified'}",
@@ -298,6 +375,7 @@ def _build_intake(
         f"Pain score (0-10): {pain_score}",
         f"Symptoms: {symptom_text}",
         f"Red flags from intake: {red_flags_text}",
+        f"Image uploaded: {image_status}",
         f"Training phase: {training_phase or 'unspecified'}",
         f"Training goal: {training_goal or 'unspecified'}",
         f"Prior injury: {prior_injury or 'none'}",
@@ -311,14 +389,49 @@ def _get_api_key() -> str:
     return os.getenv("ANTHROPIC_API_KEY") or os.getenv("ZHIPUAI_API_KEY") or ""
 
 
-def _build_messages(history: List[List[str]], user_message: str) -> List[dict]:
+def _build_image_payload(image_path: str | None) -> tuple[dict | None, str | None]:
+    if not image_path:
+        return None, None
+    try:
+        if not os.path.exists(image_path):
+            return None, "Image path not found; proceeding without image."
+        size = os.path.getsize(image_path)
+        if size > MAX_IMAGE_BYTES:
+            return None, "Image too large; proceeding without image."
+        media_type = mimetypes.guess_type(image_path)[0]
+        if not media_type or not media_type.startswith("image/"):
+            return None, "Unsupported image type; please upload PNG or JPG."
+        with open(image_path, "rb") as handle:
+            data = base64.b64encode(handle.read()).decode("ascii")
+        payload = {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            },
+        }
+        return payload, None
+    except Exception:
+        return None, "Image could not be loaded; proceeding without image."
+
+
+def _build_messages(
+    history: List[List[str]],
+    user_message: str,
+    image_payload: dict | None = None,
+) -> List[dict]:
     messages: List[dict] = []
     for user_text, assistant_text in (history or [])[-6:]:
         if user_text:
             messages.append({"role": "user", "content": user_text})
         if assistant_text:
             messages.append({"role": "assistant", "content": assistant_text})
-    messages.append({"role": "user", "content": user_message})
+    if image_payload:
+        content = [{"type": "text", "text": user_message}, image_payload]
+        messages.append({"role": "user", "content": content})
+    else:
+        messages.append({"role": "user", "content": user_message})
     return messages
 
 
@@ -336,17 +449,62 @@ def _extract_response_text(response: object) -> str:
     return "".join(parts).strip()
 
 
-async def _run_agent(system_prompt: str, messages: List[dict]) -> str:
+def _strip_images_from_messages(messages: List[dict]) -> List[dict]:
+    stripped = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+            content = "".join(text_parts).strip()
+        stripped.append({"role": message.get("role", "user"), "content": content})
+    return stripped
+
+
+def _append_image_failure_note(content: str) -> str:
+    note = (
+        "Image note: current model did not accept the image. "
+        "Continue with text-only guidance."
+    )
+    if content:
+        return f"{content}\n\n{note}"
+    return note
+
+
+async def _run_agent(
+    system_prompt: str,
+    messages: List[dict],
+    had_image: bool,
+) -> str:
     api_key = _get_api_key()
     client = AsyncAnthropic(api_key=api_key, base_url=BASE_URL)
-    response = await client.messages.create(
-        model=MODEL_NAME,
-        max_tokens=MAX_TOKENS,
-        system=system_prompt,
-        messages=messages,
-    )
-    text = _extract_response_text(response)
-    return text or "No response received from the model."
+    try:
+        response = await client.messages.create(
+            model=MODEL_NAME,
+            max_tokens=MAX_TOKENS,
+            system=system_prompt,
+            messages=messages,
+        )
+        text = _extract_response_text(response)
+        return text or "No response received from the model."
+    except Exception:
+        if not had_image:
+            raise
+        fallback_messages = _strip_images_from_messages(messages)
+        if fallback_messages:
+            last = fallback_messages[-1]
+            if last.get("role") == "user":
+                last["content"] = _append_image_failure_note(str(last.get("content", "")))
+        response = await client.messages.create(
+            model=MODEL_NAME,
+            max_tokens=MAX_TOKENS,
+            system=system_prompt,
+            messages=fallback_messages,
+        )
+        text = _extract_response_text(response)
+        return text or "No response received from the model."
 
 
 async def respond(
@@ -359,6 +517,7 @@ async def respond(
     time_since: str,
     pain_score: int,
     symptoms: List[str],
+    injury_image: str,
     training_goal: str,
     training_phase: str,
     prior_injury: str,
@@ -368,6 +527,7 @@ async def respond(
     if not _get_api_key():
         return "Missing ANTHROPIC_API_KEY (or ZHIPUAI_API_KEY). Set it before running."
 
+    normalized_history = _normalize_history(history or [])
     intake = _build_intake(
         sport,
         injury_region,
@@ -376,25 +536,29 @@ async def respond(
         time_since,
         pain_score,
         symptoms or [],
+        injury_image or "",
         training_goal,
         training_phase,
         prior_injury,
         treatment_done,
         notes,
     )
+    image_payload, image_note = _build_image_payload(injury_image)
     user_message = f"""Athlete intake:
 {intake}
 
 User request:
 {message}
 """
+    if image_note:
+        user_message = f"{user_message}\n\nImage note: {image_note}"
     system_prompt = f"""{SYSTEM_PROMPT}
 
 Skill references:
 {_load_skill_context()}
 """
-    messages = _build_messages(history or [], user_message)
-    return await _run_agent(system_prompt, messages)
+    messages = _build_messages(normalized_history, user_message, image_payload)
+    return await _run_agent(system_prompt, messages, had_image=bool(image_payload))
 
 
 def build_app() -> gr.Blocks:
@@ -450,6 +614,11 @@ def build_app() -> gr.Blocks:
         time_since = gr.Textbox(label="Time since injury", placeholder="e.g., 2 days, 3 weeks")
         pain_score = gr.Slider(label="Pain score", minimum=0, maximum=10, value=4, step=1)
         symptoms = gr.CheckboxGroup(label="Symptoms", choices=SYMPTOM_OPTIONS)
+        injury_image = gr.Image(
+            label="Optional image (PNG/JPG)",
+            type="filepath",
+            height=160,
+        )
         training_goal = gr.Textbox(
             label="Training goal",
             placeholder="e.g., return to competition in 6 weeks",
@@ -473,6 +642,7 @@ def build_app() -> gr.Blocks:
                 time_since,
                 pain_score,
                 symptoms,
+                injury_image,
                 training_goal,
                 training_phase,
                 prior_injury,
