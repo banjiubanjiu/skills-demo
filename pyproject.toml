@@ -5,7 +5,7 @@ description = "Sports injury rehab assistant (Gradio app)."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "anthropic",
+    "claude-agent-sdk",
     "gradio",
 ]
 

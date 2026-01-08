@@ -41,6 +41,12 @@ max_image_bytes: 8000000
 - `BIGMODEL_MAX_TOKENS`
 - `BIGMODEL_MAX_IMAGE_BYTES`
 
+说明：启动时会把 `config.local.yaml` 的值映射为 `ANTHROPIC_*` 环境变量供 Agent SDK 使用。
+
+## Agent SDK
+- 应用通过 Claude Agent SDK 调用模型，并允许使用 `Skill` 工具。
+- Skills 来自项目内的 `.claude/skills/`（SDK 会从项目目录加载）。
+
 ## 依赖管理
 - 依赖在 `pyproject.toml` 中维护。
 - 更新依赖后运行 `uv sync` 以刷新本地环境与 `uv.lock`。

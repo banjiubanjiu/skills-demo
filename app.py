@@ -1,7 +1,6 @@
 import base64
 import mimetypes
 import os
-from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, List
 
@@ -23,11 +22,10 @@ def _strip_unsupported_proxy_env() -> None:
 _strip_unsupported_proxy_env()
 
 import gradio as gr
-from anthropic import AsyncAnthropic
 import yaml
+from claude_agent_sdk import query, ClaudeAgentOptions
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-SKILLS_DIR = PROJECT_ROOT / ".claude" / "skills"
 CONFIG_PATH = Path(os.getenv("RECOVERY_CONFIG_PATH", PROJECT_ROOT / "config.local.yaml"))
 DEFAULT_CONFIG = {
     "api_key": "",
@@ -36,12 +34,6 @@ DEFAULT_CONFIG = {
     "max_tokens": 1200,
     "max_image_bytes": 8000000,
 }
-SKILL_NAMES = [
-    "athlete-rehab-plan",
-    "athlete-risk-flags",
-    "athlete-clinical-advice",
-    "bigmodel-claude-compat",
-]
 
 SYSTEM_PROMPT = """You are a sports injury rehab assistant for athletes.
 You provide educational guidance only and are not a medical professional.
@@ -57,7 +49,7 @@ Safety:
 - Do not provide definitive diagnosis or medication dosing.
 - If red flags exist, lead with urgent guidance to seek in-person care.
 
-Use the skill references appended below when relevant. Only surface bigmodel-claude-compat when the user asks about API or SDK compatibility.
+Use the Skill tool when relevant. Only surface bigmodel-claude-compat when the user asks about API or SDK compatibility.
 If the user request is to conduct an interview or ask follow-up questions, output questions only and do not provide a plan yet.
 Use Markdown with clear headings and concise bullets.
 """
@@ -290,32 +282,6 @@ RED_FLAG_SYMPTOMS = {
 }
 
 
-def _strip_frontmatter(text: str) -> str:
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return text.strip()
-    for idx in range(1, len(lines)):
-        if lines[idx].strip() == "---":
-            return "\n".join(lines[idx + 1 :]).strip()
-    return text.strip()
-
-
-def _load_skill_text(skill_name: str, include_references: bool) -> str:
-    skill_path = SKILLS_DIR / skill_name / "SKILL.md"
-    if not skill_path.exists():
-        return ""
-    body = _strip_frontmatter(skill_path.read_text(encoding="utf-8"))
-    parts = [f"[Skill: {skill_name}]\n{body}"] if body else []
-    if include_references:
-        ref_dir = SKILLS_DIR / skill_name / "references"
-        if ref_dir.exists():
-            for ref_file in sorted(ref_dir.glob("*.md")):
-                content = ref_file.read_text(encoding="utf-8").strip()
-                if content:
-                    parts.append(f"[Reference: {ref_file.name}]\n{content}")
-    return "\n\n".join(parts).strip()
-
-
 def _load_config_file() -> tuple[dict, str | None]:
     if not CONFIG_PATH.exists():
         return {}, None
@@ -361,15 +327,6 @@ def _runtime_config() -> dict:
     return merged
 
 
-@lru_cache(maxsize=1)
-def _load_skill_context() -> str:
-    parts = []
-    for skill_name in SKILL_NAMES:
-        include_refs = skill_name == "bigmodel-claude-compat"
-        skill_text = _load_skill_text(skill_name, include_refs)
-        if skill_text:
-            parts.append(skill_text)
-    return "\n\n".join(parts)
 
 
 def _format_list(values: Iterable[str]) -> str:
@@ -528,14 +485,30 @@ def _strip_images_from_messages(messages: List[dict]) -> List[dict]:
     return stripped
 
 
-def _append_image_failure_note(content: str) -> str:
-    note = (
-        "Image note: current model did not accept the image. "
-        "Continue with text-only guidance."
-    )
-    if content:
-        return f"{content}\n\n{note}"
-    return note
+def _message_content_to_text(content: object) -> str:
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        return "".join(parts).strip()
+    if content is None:
+        return ""
+    return str(content).strip()
+
+
+def _messages_to_prompt(system_prompt: str, messages: List[dict]) -> str:
+    lines = [system_prompt.strip(), "", "Conversation:"]
+    for message in messages:
+        role = message.get("role", "user")
+        content = _message_content_to_text(message.get("content", ""))
+        if not content:
+            continue
+        lines.append(f"{role.capitalize()}: {content}")
+    lines.append("Assistant:")
+    return "\n".join(lines).strip()
+
+
 
 
 async def _run_agent(
@@ -545,32 +518,58 @@ async def _run_agent(
 ) -> str:
     config = _runtime_config()
     api_key = str(config.get("api_key", "")).strip()
-    client = AsyncAnthropic(api_key=api_key, base_url=str(config.get("base_url")))
-    try:
-        response = await client.messages.create(
-            model=str(config.get("model")),
-            max_tokens=_parse_int(config.get("max_tokens"), DEFAULT_CONFIG["max_tokens"]),
-            system=system_prompt,
-            messages=messages,
+    if api_key and not os.getenv("ANTHROPIC_API_KEY"):
+        os.environ["ANTHROPIC_API_KEY"] = api_key
+    if config.get("base_url") and not os.getenv("ANTHROPIC_BASE_URL"):
+        os.environ["ANTHROPIC_BASE_URL"] = str(config.get("base_url"))
+    if config.get("model") and not os.getenv("ANTHROPIC_MODEL"):
+        os.environ["ANTHROPIC_MODEL"] = str(config.get("model"))
+    if config.get("max_tokens") and not os.getenv("ANTHROPIC_MAX_TOKENS"):
+        os.environ["ANTHROPIC_MAX_TOKENS"] = str(
+            _parse_int(config.get("max_tokens"), DEFAULT_CONFIG["max_tokens"])
         )
-        text = _extract_response_text(response)
-        return text or "No response received from the model."
-    except Exception:
-        if not had_image:
-            raise
-        fallback_messages = _strip_images_from_messages(messages)
-        if fallback_messages:
-            last = fallback_messages[-1]
-            if last.get("role") == "user":
-                last["content"] = _append_image_failure_note(str(last.get("content", "")))
-        response = await client.messages.create(
-            model=str(config.get("model")),
-            max_tokens=_parse_int(config.get("max_tokens"), DEFAULT_CONFIG["max_tokens"]),
-            system=system_prompt,
-            messages=fallback_messages,
+
+    prompt_messages = _strip_images_from_messages(messages) if had_image else messages
+    if had_image:
+        system_prompt = (
+            f"{system_prompt}\n\nNote: Image inputs are omitted; provide text-only guidance."
         )
-        text = _extract_response_text(response)
-        return text or "No response received from the model."
+    prompt = _messages_to_prompt(system_prompt, prompt_messages)
+
+    options = ClaudeAgentOptions(
+        cwd=str(PROJECT_ROOT),
+        setting_sources=["project", "user"],
+        allowed_tools=["Skill"],
+    )
+
+    chunks: list[str] = []
+    async for event in query(prompt=prompt, options=options):
+        if isinstance(event, str):
+            chunks.append(event)
+            continue
+        content = getattr(event, "content", None)
+        if isinstance(content, str):
+            chunks.append(content)
+            continue
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    text_part = block.get("text")
+                else:
+                    text_part = getattr(block, "text", None)
+                if isinstance(text_part, str):
+                    parts.append(text_part)
+            if parts:
+                chunks.append("".join(parts))
+            continue
+        text_part = getattr(event, "text", None)
+        if isinstance(text_part, str):
+            chunks.append(text_part)
+
+    output = "".join(chunks).strip()
+    return output or "No response received from the model."
+
 
 
 async def respond(
@@ -622,11 +621,7 @@ User request:
 """
     if image_note:
         user_message = f"{user_message}\n\nImage note: {image_note}"
-    system_prompt = f"""{SYSTEM_PROMPT}
-
-Skill references:
-{_load_skill_context()}
-"""
+    system_prompt = SYSTEM_PROMPT
     messages = _build_messages(normalized_history, user_message, image_payload)
     return await _run_agent(system_prompt, messages, had_image=bool(image_payload))
 
@@ -727,7 +722,7 @@ def build_app() -> gr.Blocks:
             if not message.strip():
                 return history, history, ""
             interview_note = (
-                "Continue the interview. Ask 1-3 follow-up questions only, "
+                "Continue the interview. Ask exactly 1 follow-up question only, "
                 "do not provide a plan yet."
             )
             response = await respond(
@@ -789,8 +784,8 @@ def build_app() -> gr.Blocks:
                     "",
                 )
             interview_prompt = (
-                "你将开始问诊。基于已提供的信息，提出5-7个高价值追问问题，"
-                "只输出问题（编号列表），不要给出诊疗方案。"
+                "你将开始问诊。基于已提供的信息，提出1个高价值追问问题，"
+                "只输出一个问题，不要给出诊疗方案。"
             )
             response = await respond(
                 interview_prompt,
