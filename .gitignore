@@ -17,3 +17,6 @@ dist/
 # Secrets
 .env
 config.local.yaml
+
+# Python virtualenv
+.venv/

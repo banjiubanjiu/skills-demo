@@ -1,0 +1,18 @@
+[project]
+name = "sports-recover"
+version = "0.1.0"
+description = "Sports injury rehab assistant (Gradio app)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic",
+    "gradio",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []
+py-modules = []
