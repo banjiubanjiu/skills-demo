@@ -4,7 +4,6 @@
 
 ## 目录结构
 - `app.py`: Gradio 主入口。
-- `web/`: 静态页面资源（`index.html`、`styles.css`、`script.js`）。
 - `data/`: 资料库与抓取内容。
   - `data/knowledge/`: PDF 等医学/康复参考资料。
   - `data/rehab-docs/`: 抓取的网页原文与清洗文本。
@@ -33,9 +32,3 @@
 ## 说明
 - 本项目提供运动损伤康复相关的教育性建议，不构成医疗诊断或治疗。
 - 若需接入外部模型或配置密钥，请使用本地 `config.local.yaml`（已在 `.gitignore` 中忽略）。
-
-## 本地预览（静态页）
-```bash
-python -m http.server 8000
-```
-然后打开 `http://localhost:8000/web/index.html`。
