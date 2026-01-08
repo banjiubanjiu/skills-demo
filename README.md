@@ -25,6 +25,22 @@
    uv run python app.py
    ```
 
+## 配置文件（config.local.yaml）
+在项目根目录创建 `config.local.yaml`，启动时会自动读取：
+```yaml
+api_key: "your_api_key"
+base_url: "https://open.bigmodel.cn/api/anthropic"
+model: "glm-4.7"
+max_tokens: 1200
+max_image_bytes: 8000000
+```
+也支持环境变量覆盖（优先级更高）：
+- `ANTHROPIC_API_KEY` 或 `ZHIPUAI_API_KEY`
+- `BIGMODEL_BASE_URL`
+- `BIGMODEL_MODEL`
+- `BIGMODEL_MAX_TOKENS`
+- `BIGMODEL_MAX_IMAGE_BYTES`
+
 ## 依赖管理
 - 依赖在 `pyproject.toml` 中维护。
 - 更新依赖后运行 `uv sync` 以刷新本地环境与 `uv.lock`。

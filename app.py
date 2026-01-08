@@ -361,51 +361,6 @@ def _runtime_config() -> dict:
     return merged
 
 
-def _settings_for_ui() -> tuple[str, str, str, int, int, str]:
-    config, error = _load_config_file()
-    merged = DEFAULT_CONFIG.copy()
-    merged.update(config)
-    status = "Settings loaded from config.local.yaml."
-    if error:
-        status = error
-    if not CONFIG_PATH.exists():
-        status = "No config.local.yaml found. Using defaults until saved."
-    return (
-        str(merged.get("api_key", "")),
-        str(merged.get("base_url", DEFAULT_CONFIG["base_url"])),
-        str(merged.get("model", DEFAULT_CONFIG["model"])),
-        _parse_int(merged.get("max_tokens"), DEFAULT_CONFIG["max_tokens"]),
-        _parse_int(merged.get("max_image_bytes"), DEFAULT_CONFIG["max_image_bytes"]),
-        status,
-    )
-
-
-def _save_settings(
-    api_key: str,
-    base_url: str,
-    model: str,
-    max_tokens: int,
-    max_image_bytes: int,
-) -> str:
-    config, error = _load_config_file()
-    if error:
-        config = {}
-    if api_key and api_key.strip():
-        config["api_key"] = api_key.strip()
-    config["base_url"] = (base_url or "").strip() or DEFAULT_CONFIG["base_url"]
-    config["model"] = (model or "").strip() or DEFAULT_CONFIG["model"]
-    config["max_tokens"] = _parse_int(max_tokens, DEFAULT_CONFIG["max_tokens"])
-    config["max_image_bytes"] = _parse_int(
-        max_image_bytes,
-        DEFAULT_CONFIG["max_image_bytes"],
-    )
-    CONFIG_PATH.write_text(
-        yaml.safe_dump(config, sort_keys=False),
-        encoding="utf-8",
-    )
-    return f"Saved settings to {CONFIG_PATH.name}."
-
-
 @lru_cache(maxsize=1)
 def _load_skill_context() -> str:
     parts = []
@@ -700,31 +655,6 @@ def build_app() -> gr.Blocks:
             elem_classes=["disclaimer"],
         )
 
-        with gr.Accordion("Settings", open=False):
-            api_key_input = gr.Textbox(
-                label="API key",
-                type="password",
-                placeholder="Paste your ZhipuAI API key",
-            )
-            base_url_input = gr.Textbox(
-                label="Base URL",
-                value=DEFAULT_CONFIG["base_url"],
-            )
-            model_input = gr.Textbox(label="Model", value=DEFAULT_CONFIG["model"])
-            max_tokens_input = gr.Number(
-                label="Max tokens",
-                value=DEFAULT_CONFIG["max_tokens"],
-                precision=0,
-            )
-            max_image_bytes_input = gr.Number(
-                label="Max image bytes",
-                value=DEFAULT_CONFIG["max_image_bytes"],
-                precision=0,
-            )
-            with gr.Row():
-                save_settings = gr.Button("Save settings")
-                reload_settings = gr.Button("Reload settings")
-            settings_status = gr.Markdown()
 
         def _toggle_steps(step: int):
             return (
@@ -1012,6 +942,7 @@ def build_app() -> gr.Blocks:
             )
             to_step2 = gr.Button("Step 2: Start interview", interactive=False)
 
+
         with step2_group:
             gr.Markdown("Step 2: Interview")
             chat_history = gr.State([])
@@ -1074,39 +1005,6 @@ def build_app() -> gr.Blocks:
                 outputs=[to_step2, validation_note],
             )
 
-        save_settings.click(
-            _save_settings,
-            inputs=[
-                api_key_input,
-                base_url_input,
-                model_input,
-                max_tokens_input,
-                max_image_bytes_input,
-            ],
-            outputs=[settings_status],
-        )
-        reload_settings.click(
-            _settings_for_ui,
-            outputs=[
-                api_key_input,
-                base_url_input,
-                model_input,
-                max_tokens_input,
-                max_image_bytes_input,
-                settings_status,
-            ],
-        )
-        demo.load(
-            _settings_for_ui,
-            outputs=[
-                api_key_input,
-                base_url_input,
-                model_input,
-                max_tokens_input,
-                max_image_bytes_input,
-                settings_status,
-            ],
-        )
 
         to_step2.click(
             _enter_step2,
