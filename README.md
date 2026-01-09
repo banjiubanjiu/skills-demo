@@ -1,3 +1,9 @@
+---
+title: sports_recover
+app_file: app.py
+sdk: gradio
+sdk_version: 6.2.0
+---
 # Sports Recover
 
 运动损伤康复助手（Gradio 应用）。
