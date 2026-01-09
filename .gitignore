@@ -20,3 +20,8 @@ config.local.yaml
 
 # Python virtualenv
 .venv/
+
+# local data & artifacts
+data/
+.gradio/
+sports_recover.egg-info/
