@@ -54,7 +54,6 @@ safehttpx==0.1.7
 semantic-version==2.10.0
 shellingham==1.5.4
 six==1.17.0
--e file:///home/colin/code/sports_recover
 sse-starlette==3.1.2
 starlette==0.50.0
 tomlkit==0.13.3
