@@ -21,6 +21,16 @@ def _strip_unsupported_proxy_env() -> None:
 
 _strip_unsupported_proxy_env()
 
+DEFAULT_UI_LANGUAGE = os.getenv("GRADIO_DEFAULT_LANGUAGE", "zh-CN")
+
+
+def _set_gradio_language_env() -> None:
+    os.environ.setdefault("GRADIO_LANGUAGE", DEFAULT_UI_LANGUAGE)
+    os.environ.setdefault("GRADIO_LANG", DEFAULT_UI_LANGUAGE)
+
+
+_set_gradio_language_env()
+
 import gradio as gr
 import yaml
 from claude_agent_sdk import query, ClaudeAgentOptions
@@ -53,6 +63,23 @@ Use the Skill tool when relevant. Only surface bigmodel-claude-compat when the u
 If the user request is to conduct an interview or ask follow-up questions, output questions only and do not provide a plan yet.
 Use Markdown with clear headings and concise bullets.
 """
+
+
+def _apply_gradio_language() -> None:
+    try:
+        from gradio.i18n import set_language
+
+        set_language(DEFAULT_UI_LANGUAGE)
+    except Exception:
+        try:
+            i18n = getattr(gr, "i18n", None)
+            if i18n and hasattr(i18n, "set_language"):
+                i18n.set_language(DEFAULT_UI_LANGUAGE)
+        except Exception:
+            pass
+
+
+_apply_gradio_language()
 
 CSS = """
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Rubik+Mono+One&display=swap');
@@ -261,24 +288,24 @@ select option {
 """
 
 SYMPTOM_OPTIONS = [
-    "swelling",
-    "instability",
-    "locking or catching",
-    "numbness or tingling",
-    "visible deformity",
-    "open wound or bleeding",
-    "fever or chills",
-    "head injury symptoms",
-    "unable to bear weight",
+    "肿胀",
+    "关节不稳",
+    "卡住/绞锁",
+    "麻木或刺痛",
+    "明显畸形",
+    "开放性伤口或出血",
+    "发热或寒战",
+    "头部受伤相关症状",
+    "无法负重",
 ]
 
 RED_FLAG_SYMPTOMS = {
-    "visible deformity",
-    "open wound or bleeding",
-    "fever or chills",
-    "head injury symptoms",
-    "unable to bear weight",
-    "numbness or tingling",
+    "明显畸形",
+    "开放性伤口或出血",
+    "发热或寒战",
+    "头部受伤相关症状",
+    "无法负重",
+    "麻木或刺痛",
 }
 
 
@@ -331,7 +358,7 @@ def _runtime_config() -> dict:
 
 def _format_list(values: Iterable[str]) -> str:
     cleaned = [value for value in values if value]
-    return ", ".join(cleaned) if cleaned else "none reported"
+    return "、".join(cleaned) if cleaned else "未报告"
 
 
 def _normalize_history(history: List) -> List[List[str]]:
@@ -382,22 +409,22 @@ def _build_intake(
     symptom_text = _format_list(symptoms)
     red_flags = sorted(RED_FLAG_SYMPTOMS.intersection(symptoms or []))
     red_flags_text = _format_list(red_flags)
-    image_status = "yes" if image_path else "no"
+    image_status = "是" if image_path else "否"
     lines = [
-        f"Sport: {sport or 'unspecified'}",
-        f"Injury region: {injury_region or 'unspecified'}",
-        f"Injury type: {injury_type or 'unspecified'}",
-        f"Onset: {onset_type or 'unspecified'}",
-        f"Time since injury: {time_since or 'unspecified'}",
-        f"Pain score (0-10): {pain_score}",
-        f"Symptoms: {symptom_text}",
-        f"Red flags from intake: {red_flags_text}",
-        f"Image uploaded: {image_status}",
-        f"Training phase: {training_phase or 'unspecified'}",
-        f"Training goal: {training_goal or 'unspecified'}",
-        f"Prior injury: {prior_injury or 'none'}",
-        f"Treatments tried: {treatment_done or 'none'}",
-        f"Notes: {notes or 'none'}",
+        f"运动项目: {sport or '未填写'}",
+        f"伤处: {injury_region or '未填写'}",
+        f"损伤类型: {injury_type or '未填写'}",
+        f"起病方式: {onset_type or '未填写'}",
+        f"受伤时长: {time_since or '未填写'}",
+        f"疼痛评分(0-10): {pain_score}",
+        f"症状: {symptom_text}",
+        f"问诊红旗: {red_flags_text}",
+        f"已上传图片: {image_status}",
+        f"训练阶段: {training_phase or '未填写'}",
+        f"训练目标: {training_goal or '未填写'}",
+        f"既往伤史: {prior_injury or '无'}",
+        f"已尝试处理: {treatment_done or '无'}",
+        f"补充说明: {notes or '无'}",
     ]
     return "\n".join(lines)
 
@@ -414,13 +441,13 @@ def _build_image_payload(
         return None, None
     try:
         if not os.path.exists(image_path):
-            return None, "Image path not found; proceeding without image."
+            return None, "未找到图片路径，将继续进行但不使用图片。"
         size = os.path.getsize(image_path)
         if size > max_bytes:
-            return None, "Image too large; proceeding without image."
+            return None, "图片过大，将继续进行但不使用图片。"
         media_type = mimetypes.guess_type(image_path)[0]
         if not media_type or not media_type.startswith("image/"):
-            return None, "Unsupported image type; please upload PNG or JPG."
+            return None, "不支持的图片格式，请上传 PNG 或 JPG。"
         with open(image_path, "rb") as handle:
             data = base64.b64encode(handle.read()).decode("ascii")
         payload = {
@@ -433,7 +460,7 @@ def _build_image_payload(
         }
         return payload, None
     except Exception:
-        return None, "Image could not be loaded; proceeding without image."
+        return None, "图片加载失败，将继续进行但不使用图片。"
 
 
 def _build_messages(
@@ -568,7 +595,7 @@ async def _run_agent(
             chunks.append(text_part)
 
     output = "".join(chunks).strip()
-    return output or "No response received from the model."
+    return output or "未收到模型回复。"
 
 
 
@@ -590,7 +617,7 @@ async def respond(
     notes: str,
 ) -> str:
     if not _get_api_key():
-        return "Missing API key. Set ANTHROPIC_API_KEY or add api_key in config.local.yaml."
+        return "缺少 API Key。请设置 ANTHROPIC_API_KEY 或在 config.local.yaml 中填写 api_key。"
 
     normalized_history = _normalize_history(history or [])
     intake = _build_intake(
@@ -613,14 +640,14 @@ async def respond(
         injury_image,
         _parse_int(config.get("max_image_bytes"), DEFAULT_CONFIG["max_image_bytes"]),
     )
-    user_message = f"""Athlete intake:
+    user_message = f"""运动员基本信息:
 {intake}
 
-User request:
+用户诉求:
 {message}
 """
     if image_note:
-        user_message = f"{user_message}\n\nImage note: {image_note}"
+        user_message = f"{user_message}\n\n图片提示: {image_note}"
     system_prompt = SYSTEM_PROMPT
     messages = _build_messages(normalized_history, user_message, image_payload)
     return await _run_agent(system_prompt, messages, had_image=bool(image_payload))
@@ -631,22 +658,22 @@ def build_app() -> gr.Blocks:
         gr.HTML(
             """
             <div class="hero">
-              <div class="hero-title">Recovery Ops</div>
+              <div class="hero-title">康复指挥台</div>
               <div class="hero-sub">
-                Athlete-focused sports injury rehab assistant. Phased plans, red flags,
-                and clinical guidance for safer return-to-sport decisions.
+                面向运动员的运动损伤康复助手：阶段化计划、风险红旗与临床提示，
+                协助更安全地重返运动。
               </div>
               <div class="hero-tags">
-                <span class="hero-tag">Phase Plan</span>
-                <span class="hero-tag">Risk Flags</span>
-                <span class="hero-tag">Clinical Notes</span>
-                <span class="hero-tag">Return Criteria</span>
+                <span class="hero-tag">阶段计划</span>
+                <span class="hero-tag">风险红旗</span>
+                <span class="hero-tag">临床提示</span>
+                <span class="hero-tag">回归标准</span>
               </div>
             </div>
             """
         )
         gr.Markdown(
-            "This tool is for education only and not a substitute for medical care.",
+            "本工具仅用于科普教育，不能替代线下面诊。",
             elem_classes=["disclaimer"],
         )
 
@@ -668,17 +695,17 @@ def build_app() -> gr.Blocks:
         ) -> List[str]:
             missing = []
             if not sport or not sport.strip():
-                missing.append("Sport")
+                missing.append("运动项目")
             if not injury_region:
-                missing.append("Injury region")
+                missing.append("伤处")
             if not injury_type or not injury_type.strip():
-                missing.append("Injury type")
+                missing.append("损伤类型")
             if not onset_type:
-                missing.append("Onset type")
+                missing.append("起病方式")
             if not time_since or not time_since.strip():
-                missing.append("Time since injury")
+                missing.append("受伤时长")
             if not training_goal or not training_goal.strip():
-                missing.append("Training goal")
+                missing.append("训练目标")
             return missing
 
         def _validate_step1(
@@ -698,7 +725,7 @@ def build_app() -> gr.Blocks:
                 training_goal,
             )
             if missing:
-                note = "Complete required fields: " + ", ".join(missing)
+                note = "请完成必填项：" + "、".join(missing)
                 return gr.update(interactive=False), gr.update(value=note, visible=True)
             return gr.update(interactive=True), gr.update(value="", visible=False)
 
@@ -722,8 +749,7 @@ def build_app() -> gr.Blocks:
             if not message.strip():
                 return history, history, ""
             interview_note = (
-                "Continue the interview. Ask exactly 1 follow-up question only, "
-                "do not provide a plan yet."
+                "继续问诊，只提出 1 个追问问题，不要给出方案。"
             )
             response = await respond(
                 f"{interview_note}\n\nUser answer: {message}",
@@ -772,7 +798,7 @@ def build_app() -> gr.Blocks:
                 training_goal,
             )
             if missing:
-                note = "Complete required fields: " + ", ".join(missing)
+                note = "请完成必填项：" + "、".join(missing)
                 return (
                     gr.update(visible=True),
                     gr.update(visible=False),
@@ -833,17 +859,17 @@ def build_app() -> gr.Blocks:
             notes: str,
         ):
             if not history:
-                return "No interview history yet. Go back to Step 2 and answer a few questions first."
+                return "暂无问诊记录，请返回第 2 步先完成问诊。"
             has_user_reply = any(
                 item.get("role") == "user" and str(item.get("content", "")).strip()
                 for item in history
             )
             if not has_user_reply:
-                return "No interview answers yet. Go back to Step 2 and answer the follow-up questions first."
+                return "暂无问诊回答，请返回第 2 步先完成追问。"
             plan_request = (
-                "Generate a final phased rehab plan and clinical advice based on the intake "
-                "and interview. Include progression criteria, return-to-sport checklist, and "
-                "clear risk flags. If any red flags exist, lead with urgent guidance."
+                "基于问诊信息生成最终的阶段化康复计划与临床建议，"
+                "包含进阶标准、回归运动清单与清晰的风险红旗。"
+                "如存在红旗症状，先给出紧急就医提示。"
             )
             return await respond(
                 plan_request,
@@ -868,95 +894,95 @@ def build_app() -> gr.Blocks:
         step3_group = gr.Group(visible=False)
 
         with step1_group:
-            gr.Markdown("Step 1: Intake & uploads")
+            gr.Markdown("第 1 步：信息采集与上传")
             validation_note = gr.Markdown(visible=False)
             sport = gr.Textbox(
-                label="Sport",
-                placeholder="e.g., soccer, basketball",
+                label="运动项目",
+                placeholder="例如：足球、篮球",
                 elem_classes=["required"],
             )
             injury_region = gr.Dropdown(
-                label="Injury region",
+                label="伤处",
                 choices=[
-                    "ankle",
-                    "knee",
-                    "hip",
-                    "lower back",
-                    "shoulder",
-                    "elbow",
-                    "wrist or hand",
-                    "foot",
-                    "hamstring",
-                    "quad",
-                    "calf",
-                    "neck",
-                    "other",
+                    "踝关节",
+                    "膝关节",
+                    "髋部",
+                    "下背部",
+                    "肩部",
+                    "肘部",
+                    "手腕或手",
+                    "足部",
+                    "腘绳肌",
+                    "股四头肌",
+                    "小腿",
+                    "颈部",
+                    "其他",
                 ],
-                value="knee",
+                value="膝关节",
                 elem_classes=["required"],
             )
             injury_type = gr.Textbox(
-                label="Injury type",
-                placeholder="e.g., sprain, strain",
+                label="损伤类型",
+                placeholder="例如：扭伤、拉伤",
                 elem_classes=["required"],
             )
             onset_type = gr.Radio(
-                label="Onset type",
-                choices=["acute trauma", "overuse", "unknown"],
-                value="acute trauma",
+                label="起病方式",
+                choices=["急性外伤", "过度使用", "不确定"],
+                value="急性外伤",
                 elem_classes=["required"],
             )
             time_since = gr.Textbox(
-                label="Time since injury",
-                placeholder="e.g., 2 days, 3 weeks",
+                label="受伤时长",
+                placeholder="例如：2 天、3 周",
                 elem_classes=["required"],
             )
-            pain_score = gr.Slider(label="Pain score", minimum=0, maximum=10, value=4, step=1)
-            symptoms = gr.CheckboxGroup(label="Symptoms", choices=SYMPTOM_OPTIONS)
+            pain_score = gr.Slider(label="疼痛评分", minimum=0, maximum=10, value=4, step=1)
+            symptoms = gr.CheckboxGroup(label="症状", choices=SYMPTOM_OPTIONS)
             injury_image = gr.Image(
-                label="Optional image (PNG/JPG)",
+                label="可选图片（PNG/JPG）",
                 type="filepath",
                 height=160,
             )
             training_goal = gr.Textbox(
-                label="Training goal",
-                placeholder="e.g., return to competition in 6 weeks",
+                label="训练目标",
+                placeholder="例如：6 周内回归比赛",
                 elem_classes=["required"],
             )
             training_phase = gr.Dropdown(
-                label="Training phase",
-                choices=["in-season", "off-season", "pre-season", "returning"],
-                value="in-season",
+                label="训练阶段",
+                choices=["赛季中", "休赛期", "季前备战", "回归训练"],
+                value="赛季中",
             )
-            prior_injury = gr.Textbox(label="Prior injury history", placeholder="optional")
-            treatment_done = gr.Textbox(label="Treatments tried", placeholder="e.g., rest, ice")
+            prior_injury = gr.Textbox(label="既往伤史", placeholder="可选")
+            treatment_done = gr.Textbox(label="已尝试处理", placeholder="例如：休息、冰敷")
             notes = gr.Textbox(
-                label="Report summary / extra notes",
+                label="影像/报告摘要或补充说明",
                 lines=3,
-                placeholder="e.g., MRI impression or prior clinician notes",
+                placeholder="例如：MRI 结论或医生建议",
             )
-            to_step2 = gr.Button("Step 2: Start interview", interactive=False)
+            to_step2 = gr.Button("第 2 步：开始问诊", interactive=False)
 
 
         with step2_group:
-            gr.Markdown("Step 2: Interview")
+            gr.Markdown("第 2 步：问诊")
             chat_history = gr.State([])
             chat = gr.Chatbot(height=360)
             chat_input = gr.Textbox(
-                placeholder="Answer the intake questions or ask a specific concern...",
+                placeholder="请回答追问，或补充具体问题...",
                 lines=3,
             )
             with gr.Row():
-                send_btn = gr.Button("Send")
-                back_to_step1 = gr.Button("Back to intake")
-                to_step3 = gr.Button("Step 3: Generate plan")
+                send_btn = gr.Button("发送")
+                back_to_step1 = gr.Button("返回信息采集")
+                to_step3 = gr.Button("第 3 步：生成方案")
 
         with step3_group:
-            gr.Markdown("Step 3: Plan & recommendations")
+            gr.Markdown("第 3 步：方案与建议")
             plan_output = gr.Markdown()
             with gr.Row():
-                back_to_step2 = gr.Button("Back to interview")
-                regenerate_plan = gr.Button("Regenerate plan")
+                back_to_step2 = gr.Button("返回问诊")
+                regenerate_plan = gr.Button("重新生成方案")
 
         intake_inputs = [
             sport,
